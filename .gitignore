@@ -1,0 +1,23 @@
+# Secretos - NUNCA se commitean
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Salida generada - se regenera corriendo el pipeline, no aporta nada versionada
+# y en la corrida real pesa >1MB de CSVs
+output/
+
+# Datos crudos del challenge: es un export de una herramienta de enriquecimiento
+# de terceros (direcciones, teléfonos, ingresos estimados de 642 empresas reales)
+# que Nicolás compartió en privado para este challenge, no datos propios para
+# publicar. Ver README.md -> "Sobre el CSV de entrada" antes de sacar esta línea.
+challenge_2026_raw.csv
+
+# Sistema
+.DS_Store
+Thumbs.db

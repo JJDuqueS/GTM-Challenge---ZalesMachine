@@ -67,6 +67,34 @@ python3 scripts/send_to_clay.py --dry-run
 
 `--input` y `--config` ya tienen default (`challenge_2026_raw.csv` y `config/icp_config.json`) — solo hace falta pasarlos para correr con otro dataset o cliente.
 
+## Fuente adicional: fintechmexico.org
+
+El challenge original también pedía scrapear dos páginas de la Asociación FinTech México además de usar el CSV — algo que quedó pendiente hasta que se agregó acá. Es opcional y se corre aparte, sin tocar el pipeline principal:
+
+```bash
+# 1. Scrapea /proveedores (36 empresas) y /membresia (tabs "Instituciones de
+#    Tecnología Financiera" y "Miembros" — el tab "Integrantes", que son
+#    proveedores no-fintech, se excluye a propósito)
+python3 scripts/scrape_fintechmexico.py --output output/fintechmexico_scraped.csv
+
+# 2. Fusiona con el CSV base, sacando duplicados por dominio (las filas del
+#    base quedan primero e intactas, así conservan su row_id ya mandado a Clay)
+python3 scripts/merge_sources.py --base challenge_2026_raw.csv \
+    --scraped output/fintechmexico_scraped.csv --output output/combined_input.csv
+
+# 3. Corre el pipeline normal sobre el combinado
+python3 scripts/run_pipeline.py --input output/combined_input.csv
+
+# 4. Antes de mandar a Clay: quedate SOLO con las filas nuevas (evita re-mandar
+#    las 291 que ya mandaste). --min-row-id es "filas del CSV base + 1"
+#    (merge_sources.py te lo imprime en su resumen).
+python3 scripts/filter_new_rows.py --input output/clay_export.csv --min-row-id 643 \
+    --output output/clay_export_new_only.csv
+python3 scripts/send_to_clay.py --input output/clay_export_new_only.csv --dry-run
+```
+
+`scrape_fintechmexico.py` no se pudo probar contra la red real desde este entorno (mismo bloqueo de red que `verify_alive.py`, ver [Dónde correr esto](#dónde-correr-esto)) — la estructura de las páginas se inspeccionó a mano con un navegador real y la lógica de parsing se validó offline contra fixtures, pero revisá las primeras filas de `output/fintechmexico_scraped.csv` antes de fusionarlas.
+
 ## Estructura del proyecto
 
 ```

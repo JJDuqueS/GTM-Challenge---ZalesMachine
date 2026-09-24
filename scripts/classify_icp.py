@@ -66,6 +66,16 @@ def check_size(row: dict, cfg: dict) -> dict:
     parsed = parse_size_range(raw)
 
     if parsed is None:
+        # Distinguimos "no hay dato" (campo vacio - el caso de las empresas
+        # scrapeadas de fintechmexico.org, que no publican cantidad de
+        # empleados) de "hay un valor pero no lo pudimos interpretar" (dato
+        # sucio de origen). Las dos fuerzan NEEDS_REVIEW igual, pero con un
+        # status distinto para que se puedan filtrar aparte en needs_review.csv.
+        if not (raw or "").strip():
+            return {
+                "pass": None, "status": "MISSING",
+                "reason": f"'{field}' vacio - no hay dato de tamaño, revisar a mano (ej. LinkedIn)",
+            }
         return {"pass": None, "status": "UNKNOWN", "reason": f"'{field}'='{raw}' no se pudo interpretar como rango"}
 
     lo, hi = parsed
@@ -77,7 +87,24 @@ def check_size(row: dict, cfg: dict) -> dict:
     overlaps = lo <= icp_max and range_hi >= icp_min
 
     if overlaps:
-        return {"pass": True, "status": "IN_RANGE", "reason": f"'{raw}' se solapa con el rango ICP {icp_min}-{icp_max}"}
+        # A pedido explicito: esto pasa QUALIFIED igual que antes (nunca bloqueo por si
+        # solo), pero "Employee Size" es siempre un bucket/rango de la fuente ('11-50',
+        # '51-200', etc.), nunca un headcount exacto - asi que se marca como "estimado"
+        # para que quede visible en Clay (icp_size_estimated + icp_size_note), en vez de
+        # quedar enterrado en icp_reason. Tambien distinguimos si el rango de la empresa
+        # cae COMPLETO adentro del rango ICP, o si solo se solapa parcialmente (un caso
+        # mas incierto: parte del rango de la empresa cae fuera del ICP).
+        fully_contained = lo >= icp_min and range_hi <= icp_max
+        if fully_contained:
+            note = f"Tamaño '{raw}' (estimado, no headcount exacto) cae completo dentro del rango ICP {icp_min}-{icp_max}."
+        else:
+            note = (f"Tamaño '{raw}' (estimado) se solapa parcialmente con el rango ICP {icp_min}-{icp_max} "
+                    f"- parte del rango declarado cae afuera, considerar verificar.")
+        return {
+            "pass": True, "status": "IN_RANGE",
+            "reason": f"'{raw}' se solapa con el rango ICP {icp_min}-{icp_max}",
+            "estimated": True, "fully_contained": fully_contained, "note": note,
+        }
     return {"pass": False, "status": "OUT_OF_RANGE", "reason": f"'{raw}' esta fuera del rango ICP {icp_min}-{icp_max}"}
 
 
@@ -189,9 +216,18 @@ def classify_row(row: dict, cfg: dict) -> dict:
         or size["pass"] is False
         or industry["pass"] is False
     )
+    # "MISSING" (el campo Employee Size vino vacio - el caso normal de las
+    # empresas scrapeadas de fintechmexico.org, que no publican esto) YA NO
+    # fuerza NEEDS_REVIEW por si solo: a pedido explicito, si el resto de los
+    # ejes (liveness, ubicacion, industria) esta limpio, la fila pasa a
+    # QUALIFIED igual, pero queda marcada con icp_missing_employee_size='SI'
+    # para que quede visible en Clay que el tamaño no se verifico.
+    # "UNKNOWN" (habia un valor pero no se pudo parsear - dato sucio de
+    # origen) SI sigue forzando NEEDS_REVIEW: ahi hay un dato raro que
+    # conviene que una persona mire, no una ausencia simple de dato.
     needs_review = (
         liveness_soft_flag
-        or (size["pass"] is None)
+        or (size["pass"] is None and size["status"] != "MISSING")
         or (industry["status"] == "NEEDS_REVIEW")
     )
 
@@ -207,6 +243,16 @@ def classify_row(row: dict, cfg: dict) -> dict:
         "icp_location_status": loc["status"],
         "icp_country_normalized": loc["country_normalized"],
         "icp_size_status": size["status"],
+        # Columna explicita para filtrar rapido en needs_review.csv (Excel/Sheets):
+        # "SI" = la fila no tiene NINGUN dato de Employee Size (no es un valor raro
+        # que no pudimos parsear, es que el campo vino vacio - ej. empresas
+        # scrapeadas de fintechmexico.org, que no publican esto).
+        "icp_missing_employee_size": "SI" if size["status"] == "MISSING" else "NO",
+        # Columna explicita para ver en Clay que "Employee Size" es un bucket/rango
+        # estimado de la fuente, no un headcount exacto, aun cuando la fila SI califica
+        # (nunca bloquea, solo avisa). icp_size_note queda vacio cuando no aplica.
+        "icp_size_estimated": "SI" if size.get("estimated") else "NO",
+        "icp_size_note": size.get("note", ""),
         "icp_industry_status": industry["status"],
         "icp_reason": " | ".join(reasons),
     }
@@ -229,7 +275,8 @@ def main():
 
     new_fields = [
         "icp_final_status", "icp_location_status", "icp_country_normalized",
-        "icp_size_status", "icp_industry_status", "icp_reason",
+        "icp_size_status", "icp_missing_employee_size", "icp_size_estimated", "icp_size_note",
+        "icp_industry_status", "icp_reason",
     ]
     out_fields = list(fieldnames) + new_fields
 

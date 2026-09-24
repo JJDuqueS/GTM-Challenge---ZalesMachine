@@ -243,6 +243,114 @@ contás cuántas filas mandaste con éxito acá, y lo comparás contra cuántas
 aparecen de verdad en la tabla de Clay. Si no cierran, este log dice
 exactamente qué `row_id` falló y por qué.
 
+### Fuente adicional (opcional) — Scraping de fintechmexico.org
+
+El correo original de Nicolás también pedía scrapear dos páginas de la
+Asociación FinTech México, además de usar el CSV — quedó pendiente hasta
+que se agregó acá, aparte del pipeline principal (`scripts/scrape_fintechmexico.py`
+→ `scripts/merge_sources.py` → `scripts/run_pipeline.py` → `scripts/filter_new_rows.py`).
+
+Trae dos fuentes:
+
+- `/proveedores` — 36 empresas del "Pool de Proveedores". El listado no
+  tiene el sitio externo de cada una (solo un link interno + un PDF), así
+  que el scraper visita cada una de las 36 páginas de perfil para sacarlo.
+- `/membresia` — tiene 3 tabs (confirmado a mano con el navegador, la
+  página no expone esto por scraping estático de forma obvia): "Instituciones
+  de Tecnología Financiera", "Miembros" e "Integrantes". Solo se usan los
+  primeros dos — "Integrantes" son proveedores no-fintech (despachos de
+  abogados, etc.) que no aportan al ICP y que además se solapan con la
+  fuente de proveedores.
+
+**Cinco bugs reales encontrados armando esto, los cinco verificados contra
+el sitio en vivo (navegador y/o un dump real del HTML) antes y después del
+fix — no solo en teoría:**
+
+1. **El link fijo de CONDUSEF contaminaba el Website de todas las empresas.**
+   Todas las páginas del sitio (listado y cada perfil) tienen un link de
+   header a "Verifica aquí" (`snefgame.condusef.gob.mx`). La primera versión
+   del scraper tomaba "el primer link externo no excluido" de cada perfil, y
+   ese link aparece antes que el de la empresa en el DOM — las 36 filas
+   salían con el mismo Website. Se corrigió agregándolo a la lista de
+   exclusión, y cambiando el criterio principal a algo más preciso: en el
+   sitio real, el link de la empresa tiene como *texto visible* su propia
+   URL (ej. un heading que dice literalmente `https://4i.digital/`) —
+   confirmado a mano en varios perfiles.
+2. **Los links a "FinTech México Festival" y "FTMX Week" hacían lo mismo.**
+   Mismo patrón que el bug 1 — otros dos links de navegación presentes en
+   todas las páginas, no cubiertos por la exclusión original. Encontrado
+   probando con Auronix real (agarraba `fintechmexicofestival.com` en vez de
+   `auronix.com`).
+3. **El más feo: `"x.com" in host` como filtro de Twitter/X rompía
+   dominios legítimos.** `is_excluded_host` comparaba por substring
+   (`bad in host`), y `"auronix.com"` contiene literalmente `"x.com"` como
+   texto (au-roni**x.com**) — el sitio real de Auronix se descartaba por
+   error, y cualquier dominio terminado en esas letras (`netflix.com`, etc.)
+   habría tenido el mismo problema. No era un caso raro: fue el motivo por
+   el que el fix del bug 2 no alcanzaba solo. Se corrigió comparando por
+   dominio exacto o subdominio real (`host == bad` o `host.endswith("." + bad)`),
+   nunca por substring suelto. Quedaron 12 casos de regresión cubriendo estos
+   bugs (`scripts/scrape_fintechmexico.py` no tiene un archivo de tests
+   separado — se corrieron manualmente contra fixtures antes de cada deploy,
+   documentado acá para que quede el rastro).
+4. **Los tabs de `/membresia` no tienen `id` en el HTML estático.** La
+   primera versión buscaba los panes por `id="w-tabs-0-data-w-pane-N"` —
+   esos ids SÍ aparecen en el navegador (Webflow los asigna con JS en
+   tiempo de ejecución), pero `requests.get()` trae el HTML sin ejecutar
+   JS, y ahí esos ids no existen. Confirmado con un dump real del HTML: los
+   3 panes no tienen `id`, pero sí la clase estándar de Webflow
+   `w-tab-pane`, como hijos directos de un contenedor
+   `div.tabs-content.w-tab-content`, en el mismo orden que los tabs
+   visibles (29 / 165 / 29 links — coincide exacto con Instituciones /
+   Miembros / Integrantes). Se corrigió identificando los panes por
+   posición dentro de ese contenedor en vez de por id.
+5. **El nombre de empresa "fallback" (cuando no hay un nombre visible en el
+   DOM) usaba el subdominio en vez de la empresa.** `name_from_domain()`
+   solo sacaba el prefijo `www.` antes de tomar el primer segmento del
+   host — para `web.didiglobal.com` daba "Web", para `mx.cobre.co` daba
+   "Mx", para `new.tumipay.com` daba "New", para `landing.trol.mx` daba
+   "Landing" (afectaba a ~4 de 227 filas en la corrida real de Juan). El
+   `Website` en sí quedaba bien en todos los casos — el bug ensuciaba
+   solo el `Company Name` de las filas que después caen en
+   `needs_review.csv` para revisión manual. Se corrigió reduciendo el
+   host a su dominio raíz con `get_root_domain()` (la misma función que ya
+   usan `normalize_domains.py` y `merge_sources.py` para deduplicar, ahora
+   importada también acá) antes de tomar el primer segmento, así un
+   subdominio ya no "roba" el nombre. Verificado con 8 casos, incluyendo
+   los 4 reales de arriba y el caso ccSLD (`sub.empresa.com.mx` → "Empresa",
+   no "Sub").
+
+**Por qué a las empresas scrapeadas les falta `Employee Size`, y cómo se
+maneja eso (decisión explícita, no un bug):** fintechmexico.org no publica
+cantidad de empleados, así que ese campo llega vacío para las tres fuentes
+scrapeadas. `classify_icp.py` distingue dos casos, con status distintos en
+`icp_size_status`:
+
+- **`MISSING`** — el campo vino vacío (no hay dato, no es que haya un valor
+  raro). Este es el caso normal de fintechmexico.org. Ya **no** fuerza
+  `NEEDS_REVIEW` por sí solo: si el resto de los ejes (liveness, ubicación,
+  industria) está limpio, la fila pasa a `QUALIFIED` igual — pero queda
+  marcada con `icp_missing_employee_size='SI'` (columna nueva), y esa misma
+  marca viaja al export de Clay como `employee_size_unverified` (ver
+  `config/icp_config.json` → `clay_export.fields`), con `employee_size`
+  vacío. Así en Clay se puede filtrar por "tamaño sin verificar" y
+  confirmarlo ahí (a mano, o vía enrichment) en vez de bloquear el envío
+  entero acá.
+- **`UNKNOWN`** — había un valor en `Employee Size`, pero no matcheó el
+  formato `NN-NN` / `NN+` (dato sucio de origen). Este caso **sí** sigue
+  forzando `NEEDS_REVIEW`: un valor raro amerita que una persona lo mire,
+  no es lo mismo que una ausencia simple de dato.
+
+Antes de este cambio, los dos casos caían en el mismo status (`UNKNOWN`) y
+los dos bloqueaban `QUALIFIED` — no había forma de separarlos ni de dejar
+pasar el caso simple (`MISSING`) sin tocar el caso sucio (`UNKNOWN`).
+
+**Reconciliación de row_id:** `merge_sources.py` pone las filas del CSV
+base primero, sin tocar su orden — así conservan los mismos `row_id` que
+ya están en Clay. Las filas scrapeadas nuevas quedan con `row_id` a partir
+de `icp-{filas_del_base + 1:05d}` en adelante. `filter_new_rows.py` usa ese
+corte para mandar a Clay solo lo nuevo, sin re-mandar lo que ya se envió.
+
 #### Automatizarlo (n8n / API), sin tocar la lógica
 
 El pedido de "que esto se mande solo" tiene dos caminos, sin reescribir

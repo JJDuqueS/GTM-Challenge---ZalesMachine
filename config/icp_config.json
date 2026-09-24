@@ -122,6 +122,9 @@
       {"source": "LinkedIn", "target": "linkedin_url"},
       {"source": "icp_country_normalized", "target": "country"},
       {"source": "Employee Size", "target": "employee_size"},
+      {"source": "icp_missing_employee_size", "target": "employee_size_unverified"},
+      {"source": "icp_size_estimated", "target": "employee_size_estimated"},
+      {"source": "icp_size_note", "target": "employee_size_note"},
       {"source": "Industry", "target": "industry"},
       {"source": "icp_reason", "target": "icp_qualification_reason"}
     ],
